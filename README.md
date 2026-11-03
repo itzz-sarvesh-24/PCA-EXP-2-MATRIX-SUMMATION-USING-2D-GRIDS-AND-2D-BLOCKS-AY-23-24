@@ -35,10 +35,217 @@ Google Colab with NVCC Compiler
 12.	Reset the device: Reset the device using cudaDeviceReset to ensure that all resources are cleaned up before the program exits.
 
 ## PROGRAM:
-TYPE YOUR CODE HERE
+```
+%%writefile single_file.cu
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <sys/time.h>
+#include <cuda_runtime.h>
+
+#define CHECK(call) \
+{ \
+    const cudaError_t error = call; \
+    if (error != cudaSuccess) \
+    { \
+        fprintf(stderr, "Error: %s:%d, code: %d, reason: %s\n", \
+                __FILE__, __LINE__, error, cudaGetErrorString(error)); \
+        exit(1); \
+    } \
+}
+
+inline double seconds()
+{
+    struct timeval tp;
+    gettimeofday(&tp, NULL);
+    return (double)tp.tv_sec + (double)tp.tv_usec * 1.e-6;
+}
+
+// Initialize integer matrix
+void initialData(int *ip, const int size)
+{
+    for (int i = 0; i < size; i++)
+    {
+        ip[i] = rand() % 100;
+    }
+}
+
+// CPU matrix addition
+void sumMatrixOnHost(int *A, int *B, int *C,
+                     const int nx, const int ny)
+{
+    for (int iy = 0; iy < ny; iy++)
+    {
+        for (int ix = 0; ix < nx; ix++)
+        {
+            int idx = iy * nx + ix;
+            C[idx] = A[idx] + B[idx];
+        }
+    }
+}
+
+// Verify GPU result against CPU result
+void checkResult(int *hostRef, int *gpuRef, const int N)
+{
+    bool match = true;
+
+    for (int i = 0; i < N; i++)
+    {
+        if (hostRef[i] != gpuRef[i])
+        {
+            match = false;
+            printf("Mismatch at %d: host = %d, GPU = %d\n",
+                   i, hostRef[i], gpuRef[i]);
+            break;
+        }
+    }
+
+    if (match)
+        printf("Arrays match successfully!\n");
+    else
+        printf("Arrays do not match!\n");
+}
+
+// CUDA kernel using 2D grid and 2D blocks
+__global__ void sumMatrixOnGPU2D(
+    const int *A, const int *B, int *C,
+    int NX, int NY)
+{
+    // Calculate column index
+    unsigned int ix = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Calculate row index
+    unsigned int iy = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Check matrix boundaries
+    if (ix < NX && iy < NY)
+    {
+        unsigned int idx = iy * NX + ix;
+        C[idx] = A[idx] + B[idx];
+    }
+}
+
+int main(int argc, char **argv)
+{
+    printf("%s Starting...\n", argv[0]);
+
+    // Select CUDA device
+    int dev = 0;
+    cudaDeviceProp deviceProp;
+    CHECK(cudaGetDeviceProperties(&deviceProp, dev));
+    CHECK(cudaSetDevice(dev));
+
+    printf("Using Device %d: %s\n", dev, deviceProp.name);
+
+    // Matrix dimensions
+    int nx = 1 << 14;
+    int ny = 1 << 14;
+
+    size_t nxy = (size_t)nx * ny;
+    size_t nBytes = nxy * sizeof(int);
+
+    printf("Matrix size: nx = %d, ny = %d\n", nx, ny);
+
+    // Allocate host memory
+    int *h_A = (int *)malloc(nBytes);
+    int *h_B = (int *)malloc(nBytes);
+    int *hostRef = (int *)malloc(nBytes);
+    int *gpuRef = (int *)malloc(nBytes);
+
+    if (!h_A || !h_B || !hostRef || !gpuRef)
+    {
+        fprintf(stderr, "Host memory allocation failed!\n");
+        return 1;
+    }
+
+    // Initialize matrices
+    double iStart = seconds();
+
+    initialData(h_A, (int)nxy);
+    initialData(h_B, (int)nxy);
+
+    double iElaps = seconds() - iStart;
+    printf("Matrix initialization elapsed: %f sec\n", iElaps);
+
+    memset(hostRef, 0, nBytes);
+    memset(gpuRef, 0, nBytes);
+
+    // CPU matrix addition
+    iStart = seconds();
+
+    sumMatrixOnHost(h_A, h_B, hostRef, nx, ny);
+
+    iElaps = seconds() - iStart;
+    printf("sumMatrixOnHost elapsed: %f sec\n", iElaps);
+
+    // Allocate GPU memory
+    int *d_MatA, *d_MatB, *d_MatC;
+
+    CHECK(cudaMalloc((void **)&d_MatA, nBytes));
+    CHECK(cudaMalloc((void **)&d_MatB, nBytes));
+    CHECK(cudaMalloc((void **)&d_MatC, nBytes));
+
+    // Copy input matrices to GPU
+    CHECK(cudaMemcpy(d_MatA, h_A, nBytes, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_MatB, h_B, nBytes, cudaMemcpyHostToDevice));
+
+    // Configure 2D grid and 2D block
+    dim3 block(32, 8);
+
+    dim3 grid(
+        (nx + block.x - 1) / block.x,
+        (ny + block.y - 1) / block.y
+    );
+
+    printf("Grid dimensions: (%d, %d)\n", grid.x, grid.y);
+    printf("Block dimensions: (%d, %d)\n", block.x, block.y);
+
+    // Launch GPU kernel
+    iStart = seconds();
+
+    sumMatrixOnGPU2D<<<grid, block>>>(
+        d_MatA, d_MatB, d_MatC, nx, ny
+    );
+
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+
+    iElaps = seconds() - iStart;
+
+    printf("sumMatrixOnGPU2D elapsed: %f sec\n", iElaps);
+
+    // Copy result from GPU to host
+    CHECK(cudaMemcpy(gpuRef, d_MatC, nBytes,
+                     cudaMemcpyDeviceToHost));
+
+    // Verify GPU result
+    checkResult(hostRef, gpuRef, (int)nxy);
+
+    // Free GPU memory
+    CHECK(cudaFree(d_MatA));
+    CHECK(cudaFree(d_MatB));
+    CHECK(cudaFree(d_MatC));
+
+    // Free host memory
+    free(h_A);
+    free(h_B);
+    free(hostRef);
+    free(gpuRef);
+
+    // Reset CUDA device
+    CHECK(cudaDeviceReset());
+
+    return 0;
+}
+```
+
 
 ## OUTPUT:
-SHOW YOUR OUTPUT HERE
+
+<img width="1072" height="202" alt="image" src="https://github.com/user-attachments/assets/eb071cd0-7b45-463a-80ea-1dac303eef60" />
+
 
 ## RESULT:
-The host took _________ seconds to complete it’s computation, while the GPU outperforms the host and completes the computation in ________ seconds. Therefore, float variables in the GPU will result in the best possible result. Thus, matrix summation using 2D grids and 2D blocks has been performed successfully.
+The host took 1.155100 seconds to complete its computation, while the GPU outperforms the host and completes the computation in 0.012781 seconds. Therefore, GPU computation provides the best performance. Thus, matrix summation using 2D grids and 2D blocks has been performed successfully.
