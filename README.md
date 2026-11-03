@@ -1,6 +1,5 @@
 # PCA-EXP-2-Matrix-Summation-using-2D-Grids-and-2D-Blocks-AY-23-24
 
-<h3>AIM:</h3>
 <h3>ENTER YOUR NAME : SARVESH M</h3>
 <h3>ENTER YOUR REGISTER NO : 212225240140</h3>
 <h3>EX.NO : 2</h3>
